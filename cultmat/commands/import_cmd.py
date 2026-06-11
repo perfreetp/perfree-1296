@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..config import AppConfig, SUPPORTED_EXTENSIONS
-from ..state import AppState, run_batch, find_material_by_hash, find_material_by_path, save_material
+from ..state import AppState, run_batch, find_material_by_hash, find_material_by_path, save_material, get_or_create_resume_task
 from ..models import Material, ProcessStatus, MaterialType
 from ..utils import compute_file_hash, scan_directory, detect_material_type, get_file_metadata, human_readable_size
 
@@ -46,11 +46,39 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
     console.print(f"[green]发现 {len(files)} 个文件[/green]")
 
     duplicates = []
-    task_id = state.create_batch_task(
-        "import", f"导入素材: {source}",
+
+    task_name = f"导入素材: {source}"
+    if resume:
+        task_name = "[续跑] " + task_name
+
+    task_id, is_resume = get_or_create_resume_task(
+        state, "import", task_name,
         source_path=source, output_path=output_dir,
         params={"recursive": recursive, "copy": copy, "move": move, "deduplicate": deduplicate}
     )
+
+    processed_hashes = set()
+    if resume:
+        session = state.get_session()
+        try:
+            imported = session.query(Material.file_hash).filter(
+                Material.status == ProcessStatus.IMPORTED
+            ).all()
+            processed_hashes = {h[0] for h in imported if h[0]}
+        finally:
+            session.close()
+
+    def is_imported(filepath):
+        if not resume:
+            return False
+        try:
+            file_hash = compute_file_hash(filepath)
+            if file_hash in processed_hashes:
+                return True
+            existing = find_material_by_hash(state, file_hash)
+            return existing is not None
+        except Exception:
+            return False
 
     def process_file(filepath, tid):
         if config.dry_run:
@@ -110,7 +138,8 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
 
     result = run_batch(
         state, task_id, files, process_file,
-        description="导入素材", resume=resume
+        description="导入素材", resume=resume,
+        skip_check=is_imported if resume else None
     )
 
     table = Table(title="导入结果")
@@ -120,6 +149,8 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
     table.add_row("成功导入", str(result["success"]))
     table.add_row("失败", str(result["failed"]))
     table.add_row("重复跳过", str(len(duplicates)))
+    if result.get("skipped", 0) > 0:
+        table.add_row("跳过(已导入)", str(result["skipped"]))
     console.print(table)
 
     if duplicates and not dry_run:

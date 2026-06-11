@@ -1,5 +1,0 @@
-﻿ID,文件名,类型,格式,大小(字节),尺寸,时长(秒),标题,作者,分类,创建日期,标签,状态,原始路径,当前路径
-1,测试图片_20240115.jpg,image,.jpg,8229,800x600,,测试图片_20240115,,测试素材,2024-01-15,"image, 测试素材, 格式:JPG, 测试, 数字文化馆",converted,test_materials\测试图片_20240115.jpg,output\imported\测试图片_20240115.jpg
-2,背景音乐.mp3,audio,.mp3,18,,,背景音乐,,,,,failed,test_materials\背景音乐.mp3,output\imported\背景音乐.mp3
-3,说明文档.txt,document,.txt,18,,,说明文档,,测试素材,,"测试素材, 测试, 数字文化馆, document, 格式:TXT",converted,test_materials\说明文档.txt,output\imported\说明文档.txt
-4,高清照片_春节活动.png,image,.png,8590,1920x1080,,高清照片_春节活动,,测试素材,,"image, 测试素材, 测试, 数字文化馆, 格式:PNG, 高清:1080P",converted,test_materials\高清照片_春节活动.png,output\imported\高清照片_春节活动.png

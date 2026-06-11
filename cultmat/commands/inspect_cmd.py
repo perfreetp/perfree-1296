@@ -15,34 +15,95 @@ console = Console()
 
 def inspect_image(filepath: str) -> dict:
     try:
-        from PIL import Image, ImageStat
+        from PIL import Image, ImageStat, ImageFilter
+
         with Image.open(filepath) as img:
             width, height = img.size
             stat = ImageStat.Stat(img)
-            if img.mode in ("L", "RGB", "RGBA"):
+
+            if img.mode in ("L",):
+                brightness = stat.mean[0] / 255 * 100
+            elif img.mode in ("RGB", "RGBA"):
                 brightness = sum(stat.mean[:3]) / len(stat.mean[:3]) / 255 * 100
             else:
                 brightness = 50.0
-            sharpness = 0.0
+
+            sharpness_variance = 0.0
             try:
                 gray = img.convert("L")
-                edges = gray.filter(Image.Filter.Kernel((3, 3), (-1, -1, -1, -1, 8, -1, -1, -1, -1), 1, 0))
-                edge_stat = ImageStat.Stat(edges)
-                sharpness = edge_stat.mean[0] / 255 * 100
-            except Exception:
-                pass
-            quality = min(100, (brightness * 0.3 + sharpness * 0.4 + min(width, height) / 40 * 0.3))
+                laplacian = gray.filter(ImageFilter.Kernel(
+                    (3, 3),
+                    [0, 1, 0,
+                     1, -4, 1,
+                     0, 1, 0],
+                    1, 0
+                ))
+                lap_stat = ImageStat.Stat(laplacian)
+                lap_var = lap_stat.var[0]
+                sharpness_variance = lap_var
+
+                if lap_var > 5000:
+                    sharpness = min(100.0, 80 + (lap_var - 5000) / 200)
+                elif lap_var > 1000:
+                    sharpness = min(80.0, 50 + (lap_var - 1000) / 133)
+                elif lap_var > 200:
+                    sharpness = min(50.0, 25 + (lap_var - 200) / 32)
+                elif lap_var > 50:
+                    sharpness = min(25.0, 10 + (lap_var - 50) / 10)
+                else:
+                    sharpness = max(0.0, lap_var / 5)
+            except Exception as e:
+                sharpness = 0.0
+
+            resolution_score = 0.0
+            max_dim = max(width, height)
+            if max_dim >= 3840:
+                resolution_score = 100
+            elif max_dim >= 2560:
+                resolution_score = 90
+            elif max_dim >= 1920:
+                resolution_score = 80
+            elif max_dim >= 1280:
+                resolution_score = 65
+            elif max_dim >= 800:
+                resolution_score = 50
+            elif max_dim >= 600:
+                resolution_score = 35
+            else:
+                resolution_score = 20
+
+            aspect_ratio_ok = 0.7 <= (width / height) <= 1.5
+            composition_score = 10 if aspect_ratio_ok else 5
+
+            brightness_penalty = 0
+            if brightness < 8 or brightness > 99:
+                brightness_penalty = 20
+            elif brightness < 15 or brightness > 98:
+                brightness_penalty = 10
+            elif brightness < 25 or brightness > 92:
+                brightness_penalty = 5
+
+            quality = (
+                sharpness * 0.45 +
+                resolution_score * 0.35 +
+                composition_score * 0.1 +
+                brightness * 0.1
+            ) - brightness_penalty
+            quality = max(0.0, min(100.0, quality))
+
             return {
                 "width": width,
                 "height": height,
                 "brightness": round(brightness, 1),
                 "sharpness": round(sharpness, 1),
+                "sharpness_variance": round(sharpness_variance, 2),
+                "resolution_score": round(resolution_score, 1),
                 "quality_score": round(quality, 1),
                 "mode": img.mode,
                 "format": img.format,
             }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "quality_score": 0}
 
 
 def inspect_audio(filepath: str) -> dict:
@@ -156,8 +217,25 @@ def inspect_cmd(ctx, material_type, min_quality, show_details, dry_run, fix_miss
                         from ..state import save_material
                         save_material(state, material)
                     if show_details:
-                        console.print(f"  🖼️ {material.file_name}: {info.get('width')}x{info.get('height')}, "
-                                      f"质量={info.get('quality_score')}%")
+                        quality = info.get("quality_score", 0)
+                        if quality >= 80:
+                            quality_color = "green"
+                        elif quality >= 50:
+                            quality_color = "yellow"
+                        else:
+                            quality_color = "red"
+                        sharpness = info.get("sharpness", 0)
+                        lap_var = info.get("sharpness_variance", 0)
+                        res_score = info.get("resolution_score", 0)
+                        bright = info.get("brightness", 0)
+                        console.print(
+                            f"  🖼️ {material.file_name}\n"
+                            f"    尺寸: {info.get('width')}x{info.get('height')} | "
+                            f"[bold {quality_color}]质量: {quality}%[/bold {quality_color}]\n"
+                            f"    清晰度: {sharpness}% (方差: {lap_var:.1f}) | "
+                            f"分辨率得分: {res_score}% | "
+                            f"亮度: {bright:.1f}%"
+                        )
                 else:
                     stats["errors"] += 1
                     if not config.dry_run:

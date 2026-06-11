@@ -10,7 +10,7 @@ from rich.table import Table
 from datetime import datetime
 
 from ..config import AppConfig
-from ..state import AppState, run_batch
+from ..state import AppState, run_batch, get_or_create_resume_task
 from sqlalchemy.orm import joinedload
 from ..models import Material, ProcessStatus, MaterialType
 from ..utils import human_readable_size, human_readable_duration
@@ -122,8 +122,12 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
 
     console.print(f"[green]待打包: {len(materials)} 个素材[/green]")
 
-    task_id = state.create_batch_task(
-        "package", f"打包 {package_name}",
+    task_name = f"打包 {package_name}"
+    if resume:
+        task_name = "[续跑] " + task_name
+
+    task_id, is_resume = get_or_create_resume_task(
+        state, "package", task_name,
         output_path=str(package_dir),
         params={"manifest_format": manifest_format, "zip": zip}
     )
@@ -131,6 +135,16 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
     manifest_path = package_dir / f"manifest.{manifest_format}"
     files_to_package = []
     stats = {"originals": 0, "previews": 0, "thumbnails": 0, "watermarked": 0, "converted": 0}
+
+    if resume:
+        checkpoint = state.get_task_checkpoint(task_id)
+        if checkpoint:
+            stats = checkpoint.get("stats", stats)
+            files_saved = checkpoint.get("files", [])
+            files_to_package.extend(files_saved)
+
+    def is_packaged(material):
+        return material.status == ProcessStatus.PACKAGED
 
     def process_material(material, tid):
         try:
@@ -159,8 +173,13 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
             console.print(f"[red]收集文件失败 {material.file_name}: {e}[/red]")
             return False
 
+    def get_extra_checkpoint():
+        return {"stats": stats.copy(), "files": list(files_to_package)}
+
     result = run_batch(state, task_id, materials, process_material,
-                       description="收集文件", resume=resume)
+                       description="收集文件", resume=resume,
+                       skip_check=is_packaged if resume else None,
+                       checkpoint_callback=get_extra_checkpoint)
 
     if config.dry_run:
         table = Table(title="打包预览")
@@ -210,4 +229,6 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
     table.add_row("水印版", str(stats["watermarked"]))
     table.add_row("转换后", str(stats["converted"]))
     table.add_row("总文件数", str(len(files_to_package)))
+    if result.get("skipped", 0) > 0:
+        table.add_row("跳过(已打包)", str(result["skipped"]))
     console.print(table)

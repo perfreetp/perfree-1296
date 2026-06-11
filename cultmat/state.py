@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Optional, List, Callable, Any, Dict
+from typing import Optional, List, Callable, Any, Dict, Tuple
 from pathlib import Path
 from tqdm import tqdm
 from rich.console import Console
@@ -165,7 +165,22 @@ class AppState:
 
 def run_batch(state: AppState, task_id: int, items: List[Any],
               processor: Callable[[Any, int], bool],
-              description: str = "处理中", resume: bool = False) -> Dict:
+              description: str = "处理中", resume: bool = False,
+              skip_check: Callable[[Any], bool] = None,
+              checkpoint_callback: Callable[[], Dict] = None) -> Dict:
+    """
+    批量处理任务
+
+    Args:
+        state: AppState实例
+        task_id: 任务ID
+        items: 待处理项目列表
+        processor: 处理函数，返回bool表示是否成功
+        description: 进度条描述
+        resume: 是否断点续跑
+        skip_check: 可选的跳过检查函数，返回True表示该项目已处理可跳过
+        checkpoint_callback: 可选的回调函数，返回额外要保存到checkpoint的数据
+    """
     session = state.get_session()
     try:
         task = session.query(BatchTask).filter(BatchTask.id == task_id).first()
@@ -177,6 +192,7 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
     start_index = 0
     success_count = 0
     failed_count = 0
+    skipped_count = 0
 
     if resume:
         checkpoint = state.get_task_checkpoint(task_id)
@@ -184,6 +200,7 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
             start_index = checkpoint.get("index", 0)
             success_count = checkpoint.get("success", 0)
             failed_count = checkpoint.get("failed", 0)
+            skipped_count = checkpoint.get("skipped", 0)
 
     state.update_task_progress(task_id, status=TaskStatus.RUNNING,
                                processed=success_count, failed=failed_count,
@@ -199,6 +216,17 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
 
     for i, item in enumerate(progress_bar, start=start_index):
         try:
+            if skip_check and skip_check(item):
+                skipped_count += 1
+                if state.config.verbose:
+                    name = getattr(item, 'file_name', str(item))
+                    console.print(f"[dim]跳过已处理: {name}[/dim]")
+                state.log_process(
+                    material_id=getattr(item, 'id', None), task_id=task_id,
+                    action="skip", success=True, message="断点续跑，跳过已处理"
+                )
+                continue
+
             ok = processor(item, task_id)
             if ok:
                 success_count += 1
@@ -214,7 +242,15 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
                 "index": i + 1,
                 "success": success_count,
                 "failed": failed_count,
+                "skipped": skipped_count,
             }
+            if checkpoint_callback:
+                try:
+                    extra = checkpoint_callback()
+                    if extra:
+                        checkpoint.update(extra)
+                except Exception as e:
+                    console.print(f"[dim]checkpoint回调异常: {e}[/dim]")
             state.update_task_progress(
                 task_id, processed=success_count, failed=failed_count,
                 current_index=i + 1, checkpoint=checkpoint
@@ -230,7 +266,34 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
         "total": len(items),
         "success": success_count,
         "failed": failed_count,
+        "skipped": skipped_count,
     }
+
+
+def get_or_create_resume_task(state: AppState, task_type: str,
+                              new_task_name: str, **kwargs) -> Tuple[int, bool]:
+    """
+    获取可续跑的任务，或创建新任务
+
+    Returns:
+        (task_id, is_resume): 任务ID, 是否为续跑任务
+    """
+    paused_task = state.get_paused_task(task_type)
+    if paused_task:
+        console.print(f"[yellow]发现未完成的任务 #{paused_task.id}: {paused_task.name}，将继续执行[/yellow]")
+        return paused_task.id, True
+
+    params = kwargs.pop("params", None)
+    source_path = kwargs.pop("source_path", None)
+    output_path = kwargs.pop("output_path", None)
+
+    task_id = state.create_batch_task(
+        task_type, new_task_name,
+        source_path=source_path,
+        output_path=output_path,
+        params=params
+    )
+    return task_id, False
 
 
 def find_material_by_hash(state: AppState, file_hash: str) -> Optional[Material]:

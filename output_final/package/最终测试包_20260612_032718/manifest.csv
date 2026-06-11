@@ -1,0 +1,7 @@
+﻿ID,文件名,类型,格式,大小(字节),尺寸,时长(秒),标题,作者,分类,创建日期,标签,状态,原始路径,当前路径
+1,中等图片_1920x1080.jpg,image,.jpg,230453,1920x1080,,中等图片_1920x1080,,,,,packaged,test_improved\中等图片_1920x1080.jpg,output_final\imported\中等图片_1920x1080.jpg
+2,无效音频.mp3,audio,.mp3,30,,,无效音频,,,,,packaged,test_improved\无效音频.mp3,output_final\imported\无效音频.mp3
+3,模糊图片_800x600.jpg,image,.jpg,25891,800x600,,模糊图片_800x600,,,,,packaged,test_improved\模糊图片_800x600.jpg,output_final\imported\模糊图片_800x600.jpg
+4,示例音频.wav,audio,.wav,88244,,,示例音频,,,,,packaged,test_improved\示例音频.wav,output_final\imported\示例音频.wav
+5,素材说明.txt,document,.txt,112,,,素材说明,,,,,packaged,test_improved\素材说明.txt,output_final\imported\素材说明.txt
+6,高清图片_2560x1440.jpg,image,.jpg,934986,2560x1440,,高清图片_2560x1440,,,,,packaged,test_improved\高清图片_2560x1440.jpg,output_final\imported\高清图片_2560x1440.jpg

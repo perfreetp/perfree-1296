@@ -5,7 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..config import AppConfig
-from ..state import AppState, run_batch, save_material
+from ..state import AppState, run_batch, save_material, get_or_create_resume_task
 from ..models import Material, ProcessStatus, MaterialType
 
 console = Console()
@@ -119,26 +119,41 @@ def extract_pdf_cover(pdf_path: str, output_path: str) -> bool:
         return False
 
 
-def convert_audio(audio_path: str, output_path: str, target_format: str = "mp3", bitrate: str = "192k") -> bool:
+def convert_audio_file(audio_path: str, output_path: str, target_format: str = "mp3", bitrate: str = "192k") -> Tuple[bool, str]:
+    """转换音频文件，返回(成功状态, 消息)"""
     try:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         import shutil
-        if Path(audio_path).suffix.lower() == f".{target_format}":
+
+        src_ext = Path(audio_path).suffix.lower()
+        target_ext = f".{target_format.lower()}"
+
+        if src_ext == target_ext:
+            try:
+                from pydub.utils import mediainfo
+                info = mediainfo(audio_path)
+                if not info or float(info.get("duration", 0)) <= 0:
+                    return False, f"音频文件无效或损坏: {Path(audio_path).name}"
+            except Exception:
+                pass
             shutil.copy2(audio_path, output_path)
-            return True
+            return True, f"格式一致，直接复制: {Path(audio_path).name}"
+
         try:
             from pydub import AudioSegment
-            ext = Path(audio_path).suffix.lstrip(".")
+            ext = src_ext.lstrip(".")
             audio = AudioSegment.from_file(audio_path, format=ext if ext else None)
             audio.export(output_path, format=target_format, bitrate=bitrate)
-            return True
+            return True, f"格式转换成功: {src_ext} -> {target_ext}"
         except Exception as e:
-            console.print(f"[dim]pydub转换失败，复制原文件: {e}[/dim]")
-            shutil.copy2(audio_path, output_path)
-            return True
+            error_msg = f"音频转换失败: {str(e)}"
+            console.print(f"[yellow]{error_msg}[/yellow]")
+            return False, error_msg
+
     except Exception as e:
-        console.print(f"[dim]音频转换失败: {e}[/dim]")
-        return False
+        error_msg = f"音频转换异常: {str(e)}"
+        console.print(f"[red]{error_msg}[/red]")
+        return False, error_msg
 
 
 def simple_ocr(image_path: str) -> str:
@@ -193,12 +208,21 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
 
     session = state.get_session()
     try:
-        query = session.query(Material).filter(
-            Material.status.in_([
-                ProcessStatus.IMPORTED, ProcessStatus.INSPECTED,
-                ProcessStatus.RENAMED, ProcessStatus.TAGGED
-            ])
-        )
+        if resume:
+            query = session.query(Material).filter(
+                Material.status.in_([
+                    ProcessStatus.IMPORTED, ProcessStatus.INSPECTED,
+                    ProcessStatus.RENAMED, ProcessStatus.TAGGED,
+                    ProcessStatus.CONVERTED, ProcessStatus.FAILED
+                ])
+            )
+        else:
+            query = session.query(Material).filter(
+                Material.status.in_([
+                    ProcessStatus.IMPORTED, ProcessStatus.INSPECTED,
+                    ProcessStatus.RENAMED, ProcessStatus.TAGGED
+                ])
+            )
         if material_type != "all":
             query = query.filter(Material.material_type == material_type)
         materials = query.all()
@@ -211,74 +235,154 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
 
     console.print(f"[green]待转换: {len(materials)} 个素材[/green]")
 
-    task_id = state.create_batch_task(
-        "convert", f"转换处理 {len(materials)} 个素材",
+    task_name = f"转换处理 {len(materials)} 个素材"
+    if resume:
+        task_name = "[续跑] " + task_name
+
+    task_id, is_resume = get_or_create_resume_task(
+        state, "convert", task_name,
         output_path=output_dir,
         params={"thumbnail": thumbnail, "preview": preview, "watermark": watermark,
                 "convert_image": convert_image, "convert_audio": convert_audio,
                 "ocr": ocr, "transcribe": transcribe}
     )
 
+    def is_converted(material):
+        return material.status == ProcessStatus.CONVERTED
+
+    def has_operation(material):
+        if material.material_type == MaterialType.IMAGE:
+            return thumbnail or preview or watermark or convert_image or crop_box or ocr
+        elif material.material_type == MaterialType.AUDIO:
+            return convert_audio or transcribe
+        elif material.material_type == MaterialType.DOCUMENT:
+            return cover or ocr
+        elif material.material_type == MaterialType.VIDEO:
+            return cover or thumbnail
+        return False
+
+    def skip_check(material):
+        if resume and is_converted(material):
+            return True
+        if not has_operation(material):
+            return True
+        return False
+
     def process_material(material, tid):
         filepath = Path(material.current_path)
         if not filepath.exists():
+            err_msg = f"文件不存在: {material.current_path}"
+            console.print(f"[red]{err_msg}[/red]")
+            state.log_process(material_id=material.id, task_id=tid, action="convert",
+                              success=False, message=err_msg)
             return False
+
+        all_success = True
+        messages = []
 
         try:
             out_base = Path(output_dir)
             out_thumb = out_base / "thumbnails" / f"{material.id}{filepath.suffix if thumbnail else '.jpg'}"
             out_preview = out_base / "previews" / f"{material.id}.jpg"
             out_watermark = out_base / "watermarked" / f"{material.id}.jpg"
-            out_converted = out_base / "converted" / f"{material.id}.{conv_cfg.image_format}"
+            out_converted_img = out_base / "converted" / f"{material.id}.{conv_cfg.image_format}"
+            out_converted_audio = out_base / "audio" / f"{material.id}.{conv_cfg.audio_format}"
 
             if material.material_type == MaterialType.IMAGE:
                 if thumbnail and not config.dry_run:
-                    if create_thumbnail(str(filepath), str(out_thumb), conv_cfg.thumbnail_size):
+                    ok = create_thumbnail(str(filepath), str(out_thumb), conv_cfg.thumbnail_size)
+                    if ok:
                         material.thumbnail_path = str(out_thumb)
+                        messages.append("缩略图生成成功")
+                    else:
+                        all_success = False
+                        messages.append("缩略图生成失败")
                 if preview and not config.dry_run:
-                    if resize_image(str(filepath), str(out_preview), conv_cfg.image_max_size, conv_cfg.image_quality):
+                    ok = resize_image(str(filepath), str(out_preview), conv_cfg.image_max_size, conv_cfg.image_quality)
+                    if ok:
                         material.preview_path = str(out_preview)
+                        messages.append("预览图生成成功")
+                    else:
+                        all_success = False
+                        messages.append("预览图生成失败")
                 if watermark and not config.dry_run:
-                    if add_watermark(str(filepath), str(out_watermark), config.watermark):
+                    ok = add_watermark(str(filepath), str(out_watermark), config.watermark)
+                    if ok:
                         material.watermarked_path = str(out_watermark)
+                        messages.append("水印添加成功")
+                    else:
+                        all_success = False
+                        messages.append("水印添加失败")
                 if convert_image and not config.dry_run:
-                    if resize_image(str(filepath), str(out_converted), conv_cfg.image_max_size, conv_cfg.image_quality):
-                        material.converted_path = str(out_converted)
+                    ok = resize_image(str(filepath), str(out_converted_img), conv_cfg.image_max_size, conv_cfg.image_quality)
+                    if ok:
+                        material.converted_path = str(out_converted_img)
+                        messages.append("图片格式转换成功")
+                    else:
+                        all_success = False
+                        messages.append("图片格式转换失败")
                 if crop_box and not config.dry_run:
                     crop_out = out_base / "cropped" / f"{material.id}.jpg"
-                    if crop_image(str(filepath), str(crop_out), crop_box):
+                    ok = crop_image(str(filepath), str(crop_out), crop_box)
+                    if ok:
                         material.converted_path = str(crop_out)
+                        messages.append("图片裁切成功")
+                    else:
+                        all_success = False
+                        messages.append("图片裁切失败")
                 if ocr and not config.dry_run:
                     material.ocr_text = simple_ocr(str(filepath))
+                    messages.append("OCR处理完成")
 
             elif material.material_type == MaterialType.AUDIO:
                 if convert_audio and not config.dry_run:
-                    audio_out = out_base / "audio" / f"{material.id}.{conv_cfg.audio_format}"
-                    if convert_audio(str(filepath), str(audio_out), conv_cfg.audio_format, conv_cfg.audio_bitrate):
-                        material.converted_path = str(audio_out)
+                    ok, msg = convert_audio_file(
+                        str(filepath), str(out_converted_audio),
+                        conv_cfg.audio_format, conv_cfg.audio_bitrate
+                    )
+                    messages.append(msg)
+                    if ok:
+                        material.converted_path = str(out_converted_audio)
+                    else:
+                        all_success = False
                 if transcribe and not config.dry_run:
                     material.transcription = simple_transcribe(str(filepath))
+                    messages.append("音频转写完成")
 
             elif material.material_type == MaterialType.DOCUMENT:
                 if cover and not config.dry_run:
                     cover_out = out_base / "covers" / f"{material.id}_cover.txt"
                     if material.file_ext == ".pdf":
-                        if extract_pdf_cover(str(filepath), str(cover_out)):
+                        ok = extract_pdf_cover(str(filepath), str(cover_out))
+                        if ok:
                             material.thumbnail_path = str(cover_out)
+                            messages.append("PDF封面提取成功")
+                        else:
+                            all_success = False
+                            messages.append("PDF封面提取失败")
                 if ocr and not config.dry_run:
                     material.ocr_text = f"[文档OCR] {filepath.name}"
+                    messages.append("文档OCR处理完成")
 
             if not config.dry_run:
-                material.status = ProcessStatus.CONVERTED
+                if all_success:
+                    material.status = ProcessStatus.CONVERTED
                 save_material(state, material)
-                state.log_process(material_id=material.id, task_id=tid, action="convert", success=True)
-            return True
+                state.log_process(
+                    material_id=material.id, task_id=tid, action="convert",
+                    success=all_success, message="; ".join(messages)
+                )
+            return all_success
         except Exception as e:
+            err_msg = f"转换异常: {str(e)}"
             console.print(f"[red]转换失败 {material.file_name}: {e}[/red]")
+            state.log_process(material_id=material.id, task_id=tid, action="convert",
+                              success=False, message=err_msg)
             return False
 
     result = run_batch(state, task_id, materials, process_material,
-                       description="转换处理", resume=resume)
+                       description="转换处理", resume=resume,
+                       skip_check=skip_check)
 
     table = Table(title="转换处理结果")
     table.add_column("项目", style="cyan")
@@ -286,4 +390,6 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
     table.add_row("总数", str(result["total"]))
     table.add_row("成功", str(result["success"]))
     table.add_row("失败", str(result["failed"]))
+    if result.get("skipped", 0) > 0:
+        table.add_row("跳过(已处理)", str(result["skipped"]))
     console.print(table)
