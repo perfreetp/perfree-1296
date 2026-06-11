@@ -162,6 +162,23 @@ class AppState:
         finally:
             session.close()
 
+    def get_last_incomplete_task(self, task_type: str = None) -> Optional[BatchTask]:
+        """获取最近一次未完成或失败的同类任务"""
+        session = self.get_session()
+        try:
+            query = session.query(BatchTask).filter(
+                BatchTask.task_type == task_type if task_type else True,
+                BatchTask.status.in_([
+                    TaskStatus.PENDING,
+                    TaskStatus.RUNNING,
+                    TaskStatus.PAUSED,
+                    TaskStatus.FAILED
+                ])
+            )
+            return query.order_by(BatchTask.created_at.desc()).first()
+        finally:
+            session.close()
+
 
 def run_batch(state: AppState, task_id: int, items: List[Any],
               processor: Callable[[Any, int], bool],
@@ -275,13 +292,38 @@ def get_or_create_resume_task(state: AppState, task_type: str,
     """
     获取可续跑的任务，或创建新任务
 
+    优先查找最近一次未完成(PENDING/RUNNING/PAUSED)或失败(FAILED)的同类任务，
+    如果找到则沿用该任务并标记续跑来源。
+
     Returns:
         (task_id, is_resume): 任务ID, 是否为续跑任务
     """
-    paused_task = state.get_paused_task(task_type)
-    if paused_task:
-        console.print(f"[yellow]发现未完成的任务 #{paused_task.id}: {paused_task.name}，将继续执行[/yellow]")
-        return paused_task.id, True
+    last_task = state.get_last_incomplete_task(task_type)
+    if last_task:
+        status_text = {
+            TaskStatus.PENDING: "待执行",
+            TaskStatus.RUNNING: "进行中",
+            TaskStatus.PAUSED: "已暂停",
+            TaskStatus.FAILED: "失败",
+        }.get(last_task.status, last_task.status)
+
+        console.print(
+            f"[yellow]发现{status_text}的任务 #{last_task.id}: "
+            f"{last_task.name}，将继续执行[/yellow]"
+        )
+
+        resume_marker = f"[续跑#{last_task.id}]"
+        if resume_marker not in last_task.name:
+            session = state.get_session()
+            try:
+                task = session.query(BatchTask).filter(BatchTask.id == last_task.id).first()
+                if task:
+                    task.name = f"{resume_marker} {task.name}"
+                    session.commit()
+            finally:
+                session.close()
+
+        return last_task.id, True
 
     params = kwargs.pop("params", None)
     source_path = kwargs.pop("source_path", None)

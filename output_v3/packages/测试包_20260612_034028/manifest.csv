@@ -1,0 +1,7 @@
+﻿ID,文件名,类型,格式,大小(字节),尺寸,时长(秒),标题,作者,分类,创建日期,标签,状态,原始路径,当前路径
+1,中等图_1920x1080.jpg,image,.jpg,275877,,,中等图_1920x1080,,,,,packaged,test_materials\中等图_1920x1080.jpg,output_v3\imported\中等图_1920x1080.jpg
+2,损坏音频.mp3,audio,.mp3,35,,,损坏音频,,,,,packaged,test_materials\损坏音频.mp3,output_v3\imported\损坏音频.mp3
+3,模糊图_800x600.jpg,image,.jpg,28795,,,模糊图_800x600,,,,,packaged,test_materials\模糊图_800x600.jpg,output_v3\imported\模糊图_800x600.jpg
+4,正常音频.wav,audio,.wav,176444,,,正常音频,,,,,packaged,test_materials\正常音频.wav,output_v3\imported\正常音频.wav
+5,素材说明.txt,document,.txt,234,,,素材说明,,,,,packaged,test_materials\素材说明.txt,output_v3\imported\素材说明.txt
+6,高清图_2560x1440.jpg,image,.jpg,1307452,,,高清图_2560x1440,,,,,packaged,test_materials\高清图_2560x1440.jpg,output_v3\imported\高清图_2560x1440.jpg

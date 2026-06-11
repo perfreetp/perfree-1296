@@ -128,15 +128,33 @@ def convert_audio_file(audio_path: str, output_path: str, target_format: str = "
         src_ext = Path(audio_path).suffix.lower()
         target_ext = f".{target_format.lower()}"
 
-        if src_ext == target_ext:
+        def _validate_audio(path: str) -> Tuple[bool, str]:
+            """验证音频文件是否有效"""
             try:
                 from pydub.utils import mediainfo
-                info = mediainfo(audio_path)
-                if not info or float(info.get("duration", 0)) <= 0:
-                    return False, f"音频文件无效或损坏: {Path(audio_path).name}"
-            except Exception:
-                pass
+                info = mediainfo(path)
+                if not info:
+                    return False, "音频文件无法解析"
+                duration = float(info.get("duration", 0))
+                if duration <= 0:
+                    return False, "音频时长为0或无效"
+                return True, f"有效音频，时长{duration:.1f}秒"
+            except Exception as e:
+                return False, f"音频验证失败: {str(e)}"
+
+        src_valid, src_msg = _validate_audio(audio_path)
+        if not src_valid:
+            return False, f"源音频损坏 - {src_msg}"
+
+        if src_ext == target_ext:
             shutil.copy2(audio_path, output_path)
+            out_valid, out_msg = _validate_audio(output_path)
+            if not out_valid:
+                try:
+                    Path(output_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False, f"复制后音频无效 - {out_msg}"
             return True, f"格式一致，直接复制: {Path(audio_path).name}"
 
         try:
@@ -144,15 +162,32 @@ def convert_audio_file(audio_path: str, output_path: str, target_format: str = "
             ext = src_ext.lstrip(".")
             audio = AudioSegment.from_file(audio_path, format=ext if ext else None)
             audio.export(output_path, format=target_format, bitrate=bitrate)
+
+            out_valid, out_msg = _validate_audio(output_path)
+            if not out_valid:
+                try:
+                    Path(output_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False, f"转换后音频无效 - {out_msg}"
+
             return True, f"格式转换成功: {src_ext} -> {target_ext}"
         except Exception as e:
             error_msg = f"音频转换失败: {str(e)}"
             console.print(f"[yellow]{error_msg}[/yellow]")
+            try:
+                Path(output_path).unlink(missing_ok=True)
+            except Exception:
+                pass
             return False, error_msg
 
     except Exception as e:
         error_msg = f"音频转换异常: {str(e)}"
         console.print(f"[red]{error_msg}[/red]")
+        try:
+            Path(output_path).unlink(missing_ok=True)
+        except Exception:
+            pass
         return False, error_msg
 
 

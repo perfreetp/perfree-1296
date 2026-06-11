@@ -135,6 +135,37 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
     manifest_path = package_dir / f"manifest.{manifest_format}"
     files_to_package = []
     stats = {"originals": 0, "previews": 0, "thumbnails": 0, "watermarked": 0, "converted": 0}
+    already_packaged = 0
+
+    def collect_files_for_material(m: Material):
+        """收集素材的所有相关文件，返回收集的数量"""
+        count = 0
+        if include_originals and m.current_path:
+            if Path(m.current_path).exists():
+                files_to_package.append(m.current_path)
+                stats["originals"] += 1
+                count += 1
+        if include_previews and m.preview_path:
+            if Path(m.preview_path).exists():
+                files_to_package.append(m.preview_path)
+                stats["previews"] += 1
+                count += 1
+        if include_thumbnails and m.thumbnail_path:
+            if Path(m.thumbnail_path).exists():
+                files_to_package.append(m.thumbnail_path)
+                stats["thumbnails"] += 1
+                count += 1
+        if include_watermarked and m.watermarked_path:
+            if Path(m.watermarked_path).exists():
+                files_to_package.append(m.watermarked_path)
+                stats["watermarked"] += 1
+                count += 1
+        if include_converted and m.converted_path:
+            if Path(m.converted_path).exists():
+                files_to_package.append(m.converted_path)
+                stats["converted"] += 1
+                count += 1
+        return count
 
     if resume:
         checkpoint = state.get_task_checkpoint(task_id)
@@ -142,39 +173,31 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
             stats = checkpoint.get("stats", stats)
             files_saved = checkpoint.get("files", [])
             files_to_package.extend(files_saved)
+            already_packaged = checkpoint.get("already_packaged", 0)
+
+    if resume:
+        for m in materials:
+            if m.status == ProcessStatus.PACKAGED:
+                collect_files_for_material(m)
+                already_packaged += 1
 
     def is_packaged(material):
         return material.status == ProcessStatus.PACKAGED
 
     def process_material(material, tid):
         try:
-            if include_originals and material.current_path:
-                if Path(material.current_path).exists():
-                    files_to_package.append(material.current_path)
-                    stats["originals"] += 1
-            if include_previews and material.preview_path:
-                if Path(material.preview_path).exists():
-                    files_to_package.append(material.preview_path)
-                    stats["previews"] += 1
-            if include_thumbnails and material.thumbnail_path:
-                if Path(material.thumbnail_path).exists():
-                    files_to_package.append(material.thumbnail_path)
-                    stats["thumbnails"] += 1
-            if include_watermarked and material.watermarked_path:
-                if Path(material.watermarked_path).exists():
-                    files_to_package.append(material.watermarked_path)
-                    stats["watermarked"] += 1
-            if include_converted and material.converted_path:
-                if Path(material.converted_path).exists():
-                    files_to_package.append(material.converted_path)
-                    stats["converted"] += 1
+            collect_files_for_material(material)
             return True
         except Exception as e:
             console.print(f"[red]收集文件失败 {material.file_name}: {e}[/red]")
             return False
 
     def get_extra_checkpoint():
-        return {"stats": stats.copy(), "files": list(files_to_package)}
+        return {
+            "stats": stats.copy(),
+            "files": list(files_to_package),
+            "already_packaged": already_packaged,
+        }
 
     result = run_batch(state, task_id, materials, process_material,
                        description="收集文件", resume=resume,

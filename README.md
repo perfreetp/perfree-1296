@@ -17,8 +17,8 @@
 | `report` | 终端预览统计、导出HTML/CSV/JSON格式处理报告 |
 
 ### 通用能力
-- **试运行预览**：所有命令支持 `--dry-run` / `--preview`，不实际修改文件
-- **断点续跑**：支持 `--resume` 从中断处继续执行
+- **试运行预览**：`import` / `inspect` / `rename` / `tag` / `convert` / `package` 支持 `--dry-run` 试运行；`rename` / `report` 支持 `--preview` 预览
+- **断点续跑**：`import` / `convert` / `package` 支持 `--resume` 从中断处继续执行
 - **进度显示**：实时进度条 + 详细日志
 - **SQLite数据库**：所有素材元数据持久化存储
 - **多种素材类型**：图片、音频、视频、文档全覆盖
@@ -269,12 +269,44 @@ cultmat/
 ## 典型工作流
 
 ```bash
-# 完整的素材整理流程
+# 1. 导入素材目录（先试运行预览）
+cultmat import ./raw_materials --copy -o ./output/imported --dry-run
+
+# 2. 实际导入
 cultmat import ./raw_materials --copy -o ./output/imported
+
+# 3. 检查素材质量
 cultmat inspect --show-details
+
+# 4. 重命名（先预览效果）
+cultmat rename -c "2024春节活动" -p "{category}_{year}_{index}_{title}" --preview
+
+# 5. 实际重命名
 cultmat rename -c "2024春节活动" -p "{category}_{year}_{index}_{title}"
-cultmat tag -t "春节" -t "民俗" -t "2024" --auto
-cultmat convert --thumbnail --preview --watermark --convert-image
+
+# 6. 批量打标签和补全信息
+cultmat tag -t "春节" -t "民俗" -t "2024" --auto -c "传统节日"
+
+# 7. 格式转换（生成缩略图+预览图+水印）
+cultmat convert --thumbnail --preview --watermark --convert-audio
+
+# 8. 打包交付
 cultmat package -n "2024春节活动素材" --zip
+
+# 9. 导出HTML处理报告
 cultmat report --format html
+```
+
+## 断点续跑说明
+
+以下命令支持 `--resume` 参数，可从中断处继续执行：
+- `import` - 跳过已导入的文件（通过文件哈希检测）
+- `convert` - 跳过状态为 `CONVERTED` 的素材
+- `package` - 跳过状态为 `PACKAGED` 的素材
+
+任务记录中会显示 `[续跑]` 标记，可以清楚看到哪些任务是续跑的。
+
+```bash
+# 示例：导入过程中断后继续
+cultmat import ./raw_materials --copy -o ./output/imported --resume
 ```

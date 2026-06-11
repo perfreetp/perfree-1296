@@ -33,7 +33,7 @@ def main(ctx, config_path, db_path, output_dir, verbose, dry_run):
 
     \b
     提供素材的批量导入、检查、重命名、打标签、转换、打包和报告功能。
-    所有命令均支持 --dry-run 试运行预览和断点续跑。
+    import / convert / package 命令支持 --resume 断点续跑。
     """
     config = AppConfig.load(config_path)
     if db_path:
