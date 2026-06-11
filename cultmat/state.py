@@ -179,6 +179,40 @@ class AppState:
         finally:
             session.close()
 
+    def get_task_by_id(self, task_id: int) -> Optional[BatchTask]:
+        """根据ID获取任务"""
+        session = self.get_session()
+        try:
+            return session.query(BatchTask).filter(BatchTask.id == task_id).first()
+        finally:
+            session.close()
+
+    def list_tasks_filtered(self, task_type: str = None, status: str = None,
+                            limit: int = 50) -> List[BatchTask]:
+        """按类型/状态筛选任务列表"""
+        session = self.get_session()
+        try:
+            query = session.query(BatchTask)
+            if task_type:
+                query = query.filter(BatchTask.task_type == task_type)
+            if status:
+                query = query.filter(BatchTask.status == status)
+            return query.order_by(BatchTask.created_at.desc()).limit(limit).all()
+        finally:
+            session.close()
+
+    def get_task_logs(self, task_id: int, only_failed: bool = False,
+                      limit: int = 500) -> List[ProcessLog]:
+        """获取任务的处理日志"""
+        session = self.get_session()
+        try:
+            query = session.query(ProcessLog).filter(ProcessLog.task_id == task_id)
+            if only_failed:
+                query = query.filter(ProcessLog.success == False)
+            return query.order_by(ProcessLog.created_at.asc()).limit(limit).all()
+        finally:
+            session.close()
+
 
 def run_batch(state: AppState, task_id: int, items: List[Any],
               processor: Callable[[Any, int], bool],
@@ -222,6 +256,15 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
     state.update_task_progress(task_id, status=TaskStatus.RUNNING,
                                processed=success_count, failed=failed_count,
                                current_index=start_index)
+    state.update_task_progress(task_id, checkpoint={"total": len(items), "index": start_index})
+    session = state.get_session()
+    try:
+        task = session.query(BatchTask).filter(BatchTask.id == task_id).first()
+        if task and not task.total_items:
+            task.total_items = len(items)
+            session.commit()
+    finally:
+        session.close()
 
     progress_bar = tqdm(
         items[start_index:],
@@ -288,42 +331,78 @@ def run_batch(state: AppState, task_id: int, items: List[Any],
 
 
 def get_or_create_resume_task(state: AppState, task_type: str,
-                              new_task_name: str, **kwargs) -> Tuple[int, bool]:
+                              new_task_name: str,
+                              resume: bool = False,
+                              force_resume_task_id: int = None,
+                              **kwargs) -> Tuple[int, bool]:
     """
     获取可续跑的任务，或创建新任务
 
-    优先查找最近一次未完成(PENDING/RUNNING/PAUSED)或失败(FAILED)的同类任务，
-    如果找到则沿用该任务并标记续跑来源。
+    Args:
+        state: AppState 实例
+        task_type: 任务类型
+        new_task_name: 新建任务时使用的名称
+        resume: 是否启用自动续跑（查找最近一次未完成任务）
+        force_resume_task_id: 强制指定任务ID进行续跑（task retry 使用）
+        **kwargs: 新建任务时的参数
 
     Returns:
         (task_id, is_resume): 任务ID, 是否为续跑任务
     """
-    last_task = state.get_last_incomplete_task(task_type)
-    if last_task:
-        status_text = {
-            TaskStatus.PENDING: "待执行",
-            TaskStatus.RUNNING: "进行中",
-            TaskStatus.PAUSED: "已暂停",
-            TaskStatus.FAILED: "失败",
-        }.get(last_task.status, last_task.status)
+    resumed_task = None
 
-        console.print(
-            f"[yellow]发现{status_text}的任务 #{last_task.id}: "
-            f"{last_task.name}，将继续执行[/yellow]"
-        )
+    if force_resume_task_id is not None:
+        session = state.get_session()
+        try:
+            resumed_task = session.query(BatchTask).filter(
+                BatchTask.id == force_resume_task_id
+            ).first()
+            if resumed_task:
+                console.print(
+                    f"[yellow]指定任务 #{resumed_task.id}: "
+                    f"{resumed_task.name}，将继续执行[/yellow]"
+                )
+        finally:
+            session.close()
 
-        resume_marker = f"[续跑#{last_task.id}]"
-        if resume_marker not in last_task.name:
+    if resumed_task is None and resume:
+        last_task = state.get_last_incomplete_task(task_type)
+        if last_task:
+            resumed_task = last_task
+            status_text = {
+                TaskStatus.PENDING: "待执行",
+                TaskStatus.RUNNING: "进行中",
+                TaskStatus.PAUSED: "已暂停",
+                TaskStatus.FAILED: "失败",
+            }.get(last_task.status, last_task.status)
+            console.print(
+                f"[yellow]发现{status_text}的任务 #{last_task.id}: "
+                f"{last_task.name}，将继续执行[/yellow]"
+            )
+
+    if resumed_task:
+        resume_marker = f"[续跑#{resumed_task.id}]"
+        if resume_marker not in resumed_task.name:
             session = state.get_session()
             try:
-                task = session.query(BatchTask).filter(BatchTask.id == last_task.id).first()
+                task = session.query(BatchTask).filter(BatchTask.id == resumed_task.id).first()
                 if task:
                     task.name = f"{resume_marker} {task.name}"
+                    task.status = TaskStatus.RUNNING
+                    session.commit()
+            finally:
+                session.close()
+        else:
+            session = state.get_session()
+            try:
+                task = session.query(BatchTask).filter(BatchTask.id == resumed_task.id).first()
+                if task:
+                    task.status = TaskStatus.RUNNING
                     session.commit()
             finally:
                 session.close()
 
-        return last_task.id, True
+        return resumed_task.id, True
 
     params = kwargs.pop("params", None)
     source_path = kwargs.pop("source_path", None)

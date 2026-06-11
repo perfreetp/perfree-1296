@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
-from typing import Optional, Tuple
+from datetime import datetime
+from typing import Optional, Tuple, Dict
 import click
 from rich.console import Console
 from rich.table import Table
@@ -223,9 +225,15 @@ def simple_transcribe(audio_path: str) -> str:
 @click.option("--resume", is_flag=True, help="断点续跑")
 @click.option("--material-type", type=click.Choice(["image", "audio", "video", "document", "all"]),
               default="all", help="按素材类型过滤")
+@click.option("--export-failures", is_flag=True, help="导出失败原因汇总")
+@click.option("--failure-format", type=click.Choice(["csv", "json"]), default="csv", show_default=True,
+              help="失败汇总导出格式")
+@click.option("--failure-output", type=click.Path(), help="失败汇总输出路径")
+@click.option("--force-task-id", "_force_task_id", type=int, hidden=True, default=None)
 @click.pass_context
 def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio,
-                crop, cover, ocr, transcribe, output_dir, dry_run, resume, material_type):
+                crop, cover, ocr, transcribe, output_dir, dry_run, resume, material_type,
+                export_failures, failure_format, failure_output, _force_task_id):
     """转换处理：封面提取、裁切、转写、OCR、水印、预览、格式转换"""
     config: AppConfig = ctx.obj["config"]
     state: AppState = ctx.obj["state"]
@@ -241,9 +249,11 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
         if len(parts) == 4:
             crop_box = tuple(parts)
 
+    failure_records = []
+
     session = state.get_session()
     try:
-        if resume:
+        if resume or _force_task_id:
             query = session.query(Material).filter(
                 Material.status.in_([
                     ProcessStatus.IMPORTED, ProcessStatus.INSPECTED,
@@ -271,11 +281,13 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
     console.print(f"[green]待转换: {len(materials)} 个素材[/green]")
 
     task_name = f"转换处理 {len(materials)} 个素材"
-    if resume:
+    if resume and not _force_task_id:
         task_name = "[续跑] " + task_name
 
     task_id, is_resume = get_or_create_resume_task(
         state, "convert", task_name,
+        resume=resume,
+        force_resume_task_id=_force_task_id,
         output_path=output_dir,
         params={"thumbnail": thumbnail, "preview": preview, "watermark": watermark,
                 "convert_image": convert_image, "convert_audio": convert_audio,
@@ -303,17 +315,52 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
             return True
         return False
 
+    def _classify_failure(msg: str) -> str:
+        """根据错误消息分类失败原因"""
+        m = (msg or "").lower()
+        if "不存在" in msg or "not found" in m or "no such file" in m:
+            return "文件不存在"
+        if "损坏" in msg or "无效音频" in msg or "invalid" in m or "corrupt" in m:
+            return "文件损坏"
+        if "转换失败" in msg or "convert" in m or "export" in m:
+            return "转换失败"
+        if "缩略图" in msg and "失败" in msg:
+            return "缩略图生成失败"
+        if "预览" in msg and "失败" in msg:
+            return "预览图生成失败"
+        if "水印" in msg and "失败" in msg:
+            return "水印添加失败"
+        if "裁切" in msg and "失败" in msg:
+            return "裁切失败"
+        if "封面" in msg and "失败" in msg:
+            return "封面提取失败"
+        if "异常" in msg or "exception" in m:
+            return "处理异常"
+        return "其他错误"
+
     def process_material(material, tid):
         filepath = Path(material.current_path)
         if not filepath.exists():
             err_msg = f"文件不存在: {material.current_path}"
             console.print(f"[red]{err_msg}[/red]")
+            if export_failures:
+                failure_records.append({
+                    "task_id": tid,
+                    "material_id": material.id,
+                    "file_name": material.file_name,
+                    "original_path": material.original_path or "",
+                    "current_path": material.current_path or "",
+                    "material_type": material.material_type,
+                    "failure_type": "文件不存在",
+                    "message": err_msg,
+                })
             state.log_process(material_id=material.id, task_id=tid, action="convert",
                               success=False, message=err_msg)
             return False
 
         all_success = True
         messages = []
+        first_failure_type = None
 
         try:
             out_base = Path(output_dir)
@@ -331,6 +378,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         messages.append("缩略图生成成功")
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or "缩略图生成失败"
                         messages.append("缩略图生成失败")
                 if preview and not config.dry_run:
                     ok = resize_image(str(filepath), str(out_preview), conv_cfg.image_max_size, conv_cfg.image_quality)
@@ -339,6 +387,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         messages.append("预览图生成成功")
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or "预览图生成失败"
                         messages.append("预览图生成失败")
                 if watermark and not config.dry_run:
                     ok = add_watermark(str(filepath), str(out_watermark), config.watermark)
@@ -347,6 +396,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         messages.append("水印添加成功")
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or "水印添加失败"
                         messages.append("水印添加失败")
                 if convert_image and not config.dry_run:
                     ok = resize_image(str(filepath), str(out_converted_img), conv_cfg.image_max_size, conv_cfg.image_quality)
@@ -355,6 +405,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         messages.append("图片格式转换成功")
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or "转换失败"
                         messages.append("图片格式转换失败")
                 if crop_box and not config.dry_run:
                     crop_out = out_base / "cropped" / f"{material.id}.jpg"
@@ -364,6 +415,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         messages.append("图片裁切成功")
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or "裁切失败"
                         messages.append("图片裁切失败")
                 if ocr and not config.dry_run:
                     material.ocr_text = simple_ocr(str(filepath))
@@ -380,6 +432,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                         material.converted_path = str(out_converted_audio)
                     else:
                         all_success = False
+                        first_failure_type = first_failure_type or _classify_failure(msg)
                 if transcribe and not config.dry_run:
                     material.transcription = simple_transcribe(str(filepath))
                     messages.append("音频转写完成")
@@ -394,6 +447,7 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                             messages.append("PDF封面提取成功")
                         else:
                             all_success = False
+                            first_failure_type = first_failure_type or "封面提取失败"
                             messages.append("PDF封面提取失败")
                 if ocr and not config.dry_run:
                     material.ocr_text = f"[文档OCR] {filepath.name}"
@@ -407,10 +461,34 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
                     material_id=material.id, task_id=tid, action="convert",
                     success=all_success, message="; ".join(messages)
                 )
+
+            if not all_success and export_failures:
+                failure_records.append({
+                    "task_id": tid,
+                    "material_id": material.id,
+                    "file_name": material.file_name,
+                    "original_path": material.original_path or "",
+                    "current_path": material.current_path or "",
+                    "material_type": material.material_type,
+                    "failure_type": first_failure_type or "其他错误",
+                    "message": "; ".join(m for m in messages if "失败" in m or "损坏" in m or "不存在" in m),
+                })
+
             return all_success
         except Exception as e:
             err_msg = f"转换异常: {str(e)}"
             console.print(f"[red]转换失败 {material.file_name}: {e}[/red]")
+            if export_failures:
+                failure_records.append({
+                    "task_id": tid,
+                    "material_id": material.id,
+                    "file_name": material.file_name,
+                    "original_path": material.original_path or "",
+                    "current_path": material.current_path or "",
+                    "material_type": material.material_type,
+                    "failure_type": "处理异常",
+                    "message": err_msg,
+                })
             state.log_process(material_id=material.id, task_id=tid, action="convert",
                               success=False, message=err_msg)
             return False
@@ -418,6 +496,40 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
     result = run_batch(state, task_id, materials, process_material,
                        description="转换处理", resume=resume,
                        skip_check=skip_check)
+
+    if export_failures and failure_records:
+        import csv as _csv
+        output_dir_path = Path(output_dir)
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+        default_name = f"convert_failures_task{task_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{failure_format}"
+        fpath = Path(failure_output) if failure_output else output_dir_path / default_name
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        if failure_format == "json":
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(failure_records, f, ensure_ascii=False, indent=2)
+        else:
+            fieldnames = ["task_id", "material_id", "file_name", "original_path",
+                          "current_path", "material_type", "failure_type", "message"]
+            with open(fpath, "w", encoding="utf-8-sig", newline="") as f:
+                writer = _csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for r in failure_records:
+                    writer.writerow(r)
+
+        # 分类统计
+        type_count: Dict[str, int] = {}
+        for r in failure_records:
+            ft = r["failure_type"]
+            type_count[ft] = type_count.get(ft, 0) + 1
+        stats_lines = [f"  [cyan]{k}[/cyan]: {v}条" for k, v in sorted(type_count.items(), key=lambda x: -x[1])]
+        console.print(
+            f"[green]失败原因汇总已导出: {fpath}[/green]\n"
+            + f"  共 {len(failure_records)} 条失败记录\n"
+            + "\n".join(stats_lines)
+        )
+    elif export_failures and not failure_records:
+        console.print("[dim]本次转换无失败记录[/dim]")
 
     table = Table(title="转换处理结果")
     table.add_column("项目", style="cyan")

@@ -90,10 +90,11 @@ def create_zip_package(file_list: List[str], output_zip: str, base_dir: str = No
 @click.option("--resume", is_flag=True, help="断点续跑")
 @click.option("--material-type", type=click.Choice(["image", "audio", "video", "document", "all"]),
               default="all", help="按素材类型过滤")
+@click.option("--force-task-id", "_force_task_id", type=int, hidden=True, default=None)
 @click.pass_context
 def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
                 include_previews, include_thumbnails, include_watermarked,
-                include_converted, dry_run, resume, material_type):
+                include_converted, dry_run, resume, material_type, _force_task_id):
     """打包交付清单和素材文件"""
     config: AppConfig = ctx.obj["config"]
     state: AppState = ctx.obj["state"]
@@ -123,11 +124,13 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
     console.print(f"[green]待打包: {len(materials)} 个素材[/green]")
 
     task_name = f"打包 {package_name}"
-    if resume:
+    if resume and not _force_task_id:
         task_name = "[续跑] " + task_name
 
     task_id, is_resume = get_or_create_resume_task(
         state, "package", task_name,
+        resume=resume,
+        force_resume_task_id=_force_task_id,
         output_path=str(package_dir),
         params={"manifest_format": manifest_format, "zip": zip}
     )

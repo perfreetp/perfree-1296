@@ -23,8 +23,9 @@ console = Console()
 @click.option("--deduplicate/--no-deduplicate", default=True, help="检测并跳过重复文件")
 @click.option("--dry-run", is_flag=True, help="试运行，不实际执行")
 @click.option("--resume", is_flag=True, help="从上次中断处继续")
+@click.option("--force-task-id", "_force_task_id", type=int, hidden=True, default=None)
 @click.pass_context
-def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_run, resume):
+def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_run, resume, _force_task_id):
     """扫描目录并导入素材文件"""
     config: AppConfig = ctx.obj["config"]
     state: AppState = ctx.obj["state"]
@@ -48,11 +49,13 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
     duplicates = []
 
     task_name = f"导入素材: {source}"
-    if resume:
+    if resume and not _force_task_id:
         task_name = "[续跑] " + task_name
 
     task_id, is_resume = get_or_create_resume_task(
         state, "import", task_name,
+        resume=resume,
+        force_resume_task_id=_force_task_id,
         source_path=source, output_path=output_dir,
         params={"recursive": recursive, "copy": copy, "move": move, "deduplicate": deduplicate}
     )

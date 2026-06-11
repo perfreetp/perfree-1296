@@ -1,0 +1,6 @@
+output_v3\imported\中等图_1920x1080.jpg
+output_v3\imported\损坏音频.mp3
+output_v3\imported\模糊图_800x600.jpg
+output_v3\imported\正常音频.wav
+output_v3\imported\素材说明.txt
+output_v3\imported\高清图_2560x1440.jpg
