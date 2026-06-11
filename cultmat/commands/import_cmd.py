@@ -60,21 +60,46 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
         params={"recursive": recursive, "copy": copy, "move": move, "deduplicate": deduplicate}
     )
 
+    # task retry 时沿用原输出目录
+    if _force_task_id and is_resume:
+        orig_task = state.get_task_by_id(_force_task_id)
+        if orig_task and orig_task.output_path:
+            if str(output_dir) != orig_task.output_path:
+                output_dir = orig_task.output_path
+                console.print(f"[cyan]指定任务 #{_force_task_id} 续跑：沿用原输出目录 {output_dir}[/cyan]")
+
     processed_hashes = set()
+    # task retry 时：从日志获取已成功的文件路径/哈希，避免重复导入
+    already_imported_paths: set = set()
+    if _force_task_id:
+        success_ids = state.get_task_success_material_ids(_force_task_id)
+        if success_ids:
+            session = state.get_session()
+            try:
+                mats = session.query(Material).filter(Material.id.in_(list(success_ids))).all()
+                already_imported_paths = {m.original_path for m in mats if m.original_path}
+                processed_hashes.update({m.file_hash for m in mats if m.file_hash})
+                console.print(f"[cyan]指定任务 #{_force_task_id} 续跑："
+                              f"跳过 {len(already_imported_paths)} 个已成功素材，"
+                              f"将重试 {len(files) - len(already_imported_paths)} 个未完成/失败文件[/cyan]")
+            finally:
+                session.close()
     if resume:
         session = state.get_session()
         try:
             imported = session.query(Material.file_hash).filter(
                 Material.status == ProcessStatus.IMPORTED
             ).all()
-            processed_hashes = {h[0] for h in imported if h[0]}
+            processed_hashes.update({h[0] for h in imported if h[0]})
         finally:
             session.close()
 
     def is_imported(filepath):
-        if not resume:
+        if not resume and not _force_task_id:
             return False
         try:
+            if _force_task_id and filepath in already_imported_paths:
+                return True
             file_hash = compute_file_hash(filepath)
             if file_hash in processed_hashes:
                 return True
@@ -142,7 +167,7 @@ def import_cmd(ctx, source, recursive, copy, move, output_dir, deduplicate, dry_
     result = run_batch(
         state, task_id, files, process_file,
         description="导入素材", resume=resume,
-        skip_check=is_imported if resume else None
+        skip_check=is_imported if (resume or _force_task_id) else None
     )
 
     table = Table(title="导入结果")

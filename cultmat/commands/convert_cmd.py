@@ -291,8 +291,18 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
         output_path=output_dir,
         params={"thumbnail": thumbnail, "preview": preview, "watermark": watermark,
                 "convert_image": convert_image, "convert_audio": convert_audio,
-                "ocr": ocr, "transcribe": transcribe}
+                "ocr": ocr, "transcribe": transcribe, "cover": cover,
+                "crop": crop, "material_type": material_type}
     )
+
+    # 如果是指定任务续跑（task retry），先从日志找出已成功的素材ID
+    already_success_ids: set = set()
+    if _force_task_id:
+        already_success_ids = state.get_task_success_material_ids(_force_task_id)
+        skipped_count = len([m for m in materials if m.id in already_success_ids])
+        if skipped_count > 0:
+            console.print(f"[cyan]指定任务 #{_force_task_id} 续跑：跳过 {skipped_count} 个已成功素材，"
+                          f"将重试 {len(materials) - skipped_count} 个未完成/失败素材[/cyan]")
 
     def is_converted(material):
         return material.status == ProcessStatus.CONVERTED
@@ -309,6 +319,8 @@ def convert_cmd(ctx, thumbnail, preview, watermark, convert_image, convert_audio
         return False
 
     def skip_check(material):
+        if _force_task_id and material.id in already_success_ids:
+            return True
         if resume and is_converted(material):
             return True
         if not has_operation(material):

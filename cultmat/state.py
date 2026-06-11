@@ -213,6 +213,93 @@ class AppState:
         finally:
             session.close()
 
+    def get_task_success_material_ids(self, task_id: int) -> set:
+        """获取任务中处理成功的素材ID集合（从日志判断）"""
+        session = self.get_session()
+        try:
+            from sqlalchemy import func
+            # 每个素材ID取最后一条日志判断最终状态
+            subq = session.query(
+                ProcessLog.material_id,
+                func.max(ProcessLog.id).label("last_log_id")
+            ).filter(
+                ProcessLog.task_id == task_id,
+                ProcessLog.material_id.isnot(None)
+            ).group_by(ProcessLog.material_id).subquery()
+
+            results = session.query(
+                ProcessLog.material_id, ProcessLog.success
+            ).join(
+                subq, ProcessLog.id == subq.c.last_log_id
+            ).filter(ProcessLog.success == True).all()
+            return {r[0] for r in results}
+        except Exception:
+            return set()
+
+    def get_task_failed_material_ids(self, task_id: int) -> set:
+        """获取任务中处理失败的素材ID集合（从日志判断）"""
+        session = self.get_session()
+        try:
+            from sqlalchemy import func
+            subq = session.query(
+                ProcessLog.material_id,
+                func.max(ProcessLog.id).label("last_log_id")
+            ).filter(
+                ProcessLog.task_id == task_id,
+                ProcessLog.material_id.isnot(None)
+            ).group_by(ProcessLog.material_id).subquery()
+
+            results = session.query(
+                ProcessLog.material_id
+            ).join(
+                subq, ProcessLog.id == subq.c.last_log_id
+            ).filter(ProcessLog.success == False).all()
+            return {r[0] for r in results}
+        except Exception:
+            return set()
+
+    def get_task_stats_from_logs(self, task_id: int) -> Dict:
+        """从日志统计任务的真实成功/失败/跳过数量"""
+        success_ids = self.get_task_success_material_ids(task_id)
+        failed_ids = self.get_task_failed_material_ids(task_id)
+        task = self.get_task_by_id(task_id)
+        total = task.total_items or 0 if task else 0
+        processed = len(success_ids) + len(failed_ids)
+        skipped = max(0, total - processed)
+        return {
+            "total": total,
+            "success": len(success_ids),
+            "failed": len(failed_ids),
+            "skipped": skipped,
+            "processed": processed,
+        }
+
+    def delete_tasks(self, task_ids: List[int], delete_logs: bool = True) -> Tuple[int, int]:
+        """批量删除任务及其日志
+        Returns: (删除的任务数, 删除的日志数)
+        """
+        session = self.get_session()
+        try:
+            task_count = 0
+            log_count = 0
+            for tid in task_ids:
+                if delete_logs:
+                    logs_deleted = session.query(ProcessLog).filter(
+                        ProcessLog.task_id == tid
+                    ).delete(synchronize_session=False)
+                    log_count += logs_deleted
+                t = session.query(BatchTask).filter(BatchTask.id == tid).first()
+                if t:
+                    session.delete(t)
+                    task_count += 1
+            session.commit()
+            return task_count, log_count
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
 
 def run_batch(state: AppState, task_id: int, items: List[Any],
               processor: Callable[[Any, int], bool],

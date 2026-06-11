@@ -1,2 +1,0 @@
-﻿task_id,material_id,file_name,original_path,current_path,material_type,failure_type,message
-2,2,损坏音频.mp3,output_v3\imported\损坏音频.mp3,output_full\imported\损坏音频.mp3,audio,文件损坏,源音频损坏 - 音频文件无法解析

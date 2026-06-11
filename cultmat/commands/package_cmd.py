@@ -127,18 +127,53 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
     if resume and not _force_task_id:
         task_name = "[续跑] " + task_name
 
+    # 保存完整的打包参数（包括所有 include_* 选项）
+    full_params = {
+        "manifest_format": manifest_format, "zip": zip,
+        "include_originals": include_originals,
+        "include_previews": include_previews,
+        "include_thumbnails": include_thumbnails,
+        "include_watermarked": include_watermarked,
+        "include_converted": include_converted,
+        "material_type": material_type,
+        "name": name,
+    }
+
     task_id, is_resume = get_or_create_resume_task(
         state, "package", task_name,
         resume=resume,
         force_resume_task_id=_force_task_id,
         output_path=str(package_dir),
-        params={"manifest_format": manifest_format, "zip": zip}
+        params=full_params
     )
+
+    # task retry 时沿用原输出目录
+    if _force_task_id and is_resume:
+        orig_task = state.get_task_by_id(_force_task_id)
+        if orig_task and orig_task.output_path:
+            orig_out = Path(orig_task.output_path)
+            # 沿用原 package_dir（如果存在则复用，不存在则根据 output_path 还原）
+            if orig_out.exists() or str(package_dir) != str(orig_out):
+                package_dir = orig_out
+                output_dir = str(orig_out.parent)
+                # 从原 output_path 还原 package_name
+                package_name = orig_out.name
+                manifest_path = package_dir / f"manifest.{manifest_format}"
+                console.print(f"[cyan]指定任务 #{_force_task_id} 续跑：沿用原输出目录 {package_dir}[/cyan]")
 
     manifest_path = package_dir / f"manifest.{manifest_format}"
     files_to_package = []
     stats = {"originals": 0, "previews": 0, "thumbnails": 0, "watermarked": 0, "converted": 0}
     already_packaged = 0
+
+    # 如果是指定任务续跑（task retry），先从日志找出已成功的素材ID
+    already_success_ids: set = set()
+    if _force_task_id:
+        already_success_ids = state.get_task_success_material_ids(_force_task_id)
+        skipped_count = len([m for m in materials if m.id in already_success_ids])
+        if skipped_count > 0:
+            console.print(f"[cyan]指定任务 #{_force_task_id} 续跑：跳过 {skipped_count} 个已成功素材，"
+                          f"将重试 {len(materials) - skipped_count} 个未完成/失败素材[/cyan]")
 
     def collect_files_for_material(m: Material):
         """收集素材的所有相关文件，返回收集的数量"""
@@ -185,13 +220,23 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
                 already_packaged += 1
 
     def is_packaged(material):
+        if _force_task_id and material.id in already_success_ids:
+            return True
         return material.status == ProcessStatus.PACKAGED
 
     def process_material(material, tid):
         try:
-            collect_files_for_material(material)
+            collected = collect_files_for_material(material)
+            state.log_process(
+                material_id=material.id, task_id=tid, action="package",
+                success=True, message=f"收集文件: {collected}个"
+            )
             return True
         except Exception as e:
+            state.log_process(
+                material_id=material.id, task_id=tid, action="package",
+                success=False, message=str(e)
+            )
             console.print(f"[red]收集文件失败 {material.file_name}: {e}[/red]")
             return False
 
@@ -204,7 +249,7 @@ def package_cmd(ctx, output_dir, name, manifest_format, zip, include_originals,
 
     result = run_batch(state, task_id, materials, process_material,
                        description="收集文件", resume=resume,
-                       skip_check=is_packaged if resume else None,
+                       skip_check=is_packaged if (resume or _force_task_id) else None,
                        checkpoint_callback=get_extra_checkpoint)
 
     if config.dry_run:
